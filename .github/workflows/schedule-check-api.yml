@@ -22,7 +22,7 @@ jobs:
         shell: bash
         run: |
           # Set current event ID
-          EVENT_ID=echo $EVENT_IDS | cut -d "," -f ${{ matrix.eventInput }}
+          EVENT_ID=$(echo $EVENT_IDS | cut -d "," -f ${{ matrix.eventInput }})
 
           # Replace with your actual API endpoint
           API_URL="$API_BASE_URL/$EVENT_ID?api_key=$API_KEY"
