@@ -2,38 +2,122 @@ name: Check API for new data
 
 on:
   schedule:
-    - cron: '0 7,19 * * *'
+    - cron: '0 7,19 * * *'  # Run twice daily at 7 AM and 7 PM UTC
+  workflow_dispatch:  # Allow manual triggering
 
 env:
   API_KEY: ${{ secrets.API_KEY }}
-  API_BASE_URL: ${{ secrets.BASE_URL }}
-  EVENT_IDS: ${{ vars.EVENT_IDS }}
+  API_URL: ${{ secrets.API_URL }}
   RESULTS_BASE_URL: ${{ vars.RESULTS_BASE_URL }}
   USER_AGENT: ${{ secrets.USER_AGENT }}
 
 jobs:
   check:
-    strategy:
-      matrix:
-        eventInput: [1, 2, 3]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Setup cache directory
+        run: mkdir -p .api-cache
+        
+      - name: Restore previous API responses
+        uses: actions/cache@v3
+        with:
+          path: .api-cache
+          key: api-responses-${{ github.run_id }}
+          restore-keys: |
+            api-responses-
+        
       - name: Check for new data
         shell: bash
         run: |
-          # Set current event ID
-          EVENT_ID=$(echo $EVENT_IDS | cut -d "," -f ${{ matrix.eventInput }})
+          set -e  # Exit on any error
+          
+          echo "Checking API endpoint: $API_URL"
 
-          # Replace with your actual API endpoint
-          API_URL="$API_BASE_URL/$EVENT_ID?api_key=$API_KEY"
+          # Create cache file path
+          CACHE_FILE=".api-cache/response.json"
+          PREV_HASH_FILE=".api-cache/hash.txt"
           
           # Fetch the latest data from the API
-          response_length=$(curl -s $API_URL -H "User-Agent: $USER_AGENT" | jq '.responseData | length')
+          echo "Fetching data from API..."
+          if ! response=$(curl -s -w "%{http_code}" -H "User-Agent: $USER_AGENT" "$API_URL"); then
+            echo "Error: Failed to fetch data from API"
+            exit 1
+          fi
           
-          # Check if the response contains new data
-          if [[ $response_length > 0 ]]; then
-            echo "New events found!"
-            echo "Go to $RESULTS_BASE_URL/$EVENT_ID for more details."
+          # Extract HTTP status code (last 3 characters)
+          http_code="${response: -3}"
+          api_response="${response%???}"
+          
+          if [[ "$http_code" -ne 200 ]]; then
+            echo "Error: API returned HTTP $http_code"
+            echo "Response: $api_response"
+            exit 1
+          fi
+          
+          # Validate JSON response
+          if ! echo "$api_response" | jq . > /dev/null 2>&1; then
+            echo "Error: Invalid JSON response from API"
+            echo "Response: $api_response"
+            exit 1
+          fi
+          
+          # Extract responseData and calculate hash (excluding clock)
+          if ! response_data=$(echo "$api_response" | jq -r '.responseData // empty'); then
+            echo "Error: Could not extract responseData from API response"
+            exit 1
+          fi
+          
+          if [[ -z "$response_data" || "$response_data" == "null" ]]; then
+            echo "No responseData found in API response"
+            current_hash=""
           else
-            echo "No new data found."
+            # Remove clock field from the entire response before hashing (not just responseData)
+            # This ensures we only detect meaningful changes, not clock updates
+            filtered_response=$(echo "$api_response" | jq 'del(.clock)')
+            current_hash=$(echo "$filtered_response" | sha256sum | cut -d' ' -f1)
+            
+            # Calculate meaningful metrics
+            low_count=$(echo "$response_data" | jq '.low | length // 0')
+            good_count=$(echo "$response_data" | jq '.good | length // 0')
+            total_items=$((low_count + good_count))
+            
+            echo "Current response contains: $low_count low items, $good_count good items (total: $total_items) - clock ignored for change detection"
+          fi
+          
+          # Check if we have previous data
+          if [[ -f "$PREV_HASH_FILE" ]]; then
+            prev_hash=$(cat "$PREV_HASH_FILE")
+            echo "Previous hash: $prev_hash"
+            echo "Current hash: $current_hash"
+            
+            if [[ "$prev_hash" != "$current_hash" ]]; then
+              echo "🚨 CHANGE DETECTED! API response has changed"
+              echo "📊 Low items: $low_count, Good items: $good_count (Total: $total_items)"
+              echo "🔗 Details: $RESULTS_BASE_URL"
+              
+              # Save the new response for comparison
+              echo "$api_response" > "$CACHE_FILE"
+              echo "$current_hash" > "$PREV_HASH_FILE"
+              
+              # Set output for potential notifications
+              echo "changed=true" >> $GITHUB_OUTPUT
+              echo "low_count=$low_count" >> $GITHUB_OUTPUT
+              echo "good_count=$good_count" >> $GITHUB_OUTPUT
+              echo "total_items=$total_items" >> $GITHUB_OUTPUT
+            else
+              echo "✅ No changes detected"
+              echo "changed=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "📝 First run - establishing baseline"
+            echo "$api_response" > "$CACHE_FILE"
+            echo "$current_hash" > "$PREV_HASH_FILE"
+            echo "Low items: $low_count, Good items: $good_count (Total: $total_items)"
+            echo "changed=first_run" >> $GITHUB_OUTPUT
+            echo "low_count=$low_count" >> $GITHUB_OUTPUT
+            echo "good_count=$good_count" >> $GITHUB_OUTPUT
+            echo "total_items=$total_items" >> $GITHUB_OUTPUT
           fi
