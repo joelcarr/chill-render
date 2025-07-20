@@ -42,6 +42,7 @@ jobs:
           
           # Fetch the latest data from the API
           echo "Fetching data from API..."
+          echo "Debug: Running command: curl -s -w \"%{http_code}\" -H \"User-Agent: $USER_AGENT\" \"$API_URL\""
           if ! response=$(curl -s -w "%{http_code}" -H "User-Agent: $USER_AGENT" "$API_URL"); then
             echo "Error: Failed to fetch data from API"
             exit 1
