@@ -1,5 +1,8 @@
 name: Check API for new data
 
+permissions:
+  issues: write
+
 on:
   schedule:
     - cron: '*/30 * * * *'  # Run every 30 minutes
